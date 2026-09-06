@@ -23,13 +23,17 @@ if [ -z "${MODEL_URL:-}" ]; then
 fi
 
 echo "fetch_model.sh: downloading model from release asset..."
+echo "fetch_model.sh: URL: ${MODEL_URL}"
+
 if [ -n "${MODEL_TOKEN:-}" ]; then
-  # Private repo: authenticate against github.com; the signed redirect
-  # to objects.githubusercontent.com needs no further auth.
+  echo "fetch_model.sh: MODEL_TOKEN detected - using authenticated download."
+  # Bearer works for both classic PATs and fine-grained PATs (github_pat_...).
   curl -L --fail --retry 3 --retry-delay 2 \
-    -H "Authorization: token ${MODEL_TOKEN}" \
+    -H "Authorization: Bearer ${MODEL_TOKEN}" \
     -o "$MODEL_PATH" "$MODEL_URL"
 else
+  echo "fetch_model.sh: MODEL_TOKEN is NOT set - trying anonymous download."
+  echo "fetch_model.sh: anonymous download only works for PUBLIC repositories."
   curl -L --fail --retry 3 --retry-delay 2 -o "$MODEL_PATH" "$MODEL_URL"
 fi
 echo "fetch_model.sh: model downloaded ($(du -h "$MODEL_PATH" | cut -f1))."
