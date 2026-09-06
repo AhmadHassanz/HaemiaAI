@@ -7,7 +7,11 @@
 #   MODEL_URL    - required - asset URL, e.g.
 #                 https://github.com/<user>/<repo>/releases/download/v1.0/haemia_research_demo.keras
 #   MODEL_TOKEN  - optional - GitHub token; REQUIRED when the repo is private.
-#                 Use a fine-grained PAT with Contents: Read-only on this repo.
+#                 Fine-grained PAT with Contents: Read-only on this repo.
+#
+# NOTE: the plain releases/download URL returns 404 for PRIVATE repos even
+# with a valid token — private assets must be fetched through the GitHub API,
+# which is what this script does (works for public repos anonymously too).
 set -euo pipefail
 
 MODEL_PATH="model/haemia_research_demo.keras"
@@ -22,18 +26,40 @@ if [ -z "${MODEL_URL:-}" ]; then
   exit 0
 fi
 
-echo "fetch_model.sh: downloading model from release asset..."
-echo "fetch_model.sh: URL: ${MODEL_URL}"
+# Parse https://github.com/<owner>/<repo>/releases/download/<tag>/<file>
+url_path="${MODEL_URL#https://github.com/}"
+owner="$(printf '%s' "$url_path" | cut -d/ -f1)"
+repo="$(printf '%s' "$url_path" | cut -d/ -f2)"
+tag="$(printf '%s' "$url_path" | cut -d/ -f5)"
+filename="$(printf '%s' "$url_path" | cut -d/ -f6)"
 
+echo "fetch_model.sh: owner=${owner} repo=${repo} tag=${tag} file=${filename}"
+
+auth_args=()
 if [ -n "${MODEL_TOKEN:-}" ]; then
   echo "fetch_model.sh: MODEL_TOKEN detected - using authenticated download."
-  # Bearer works for both classic PATs and fine-grained PATs (github_pat_...).
-  curl -L --fail --retry 3 --retry-delay 2 \
-    -H "Authorization: Bearer ${MODEL_TOKEN}" \
-    -o "$MODEL_PATH" "$MODEL_URL"
+  auth_args=(-H "Authorization: Bearer ${MODEL_TOKEN}")
 else
-  echo "fetch_model.sh: MODEL_TOKEN is NOT set - trying anonymous download."
-  echo "fetch_model.sh: anonymous download only works for PUBLIC repositories."
-  curl -L --fail --retry 3 --retry-delay 2 -o "$MODEL_PATH" "$MODEL_URL"
+  echo "fetch_model.sh: MODEL_TOKEN not set - anonymous download (public repos only)."
 fi
+
+echo "fetch_model.sh: resolving asset id from the GitHub API..."
+asset_url=$(curl -fsSL ${auth_args[@]+"${auth_args[@]}"} \
+  "https://api.github.com/repos/${owner}/${repo}/releases/tags/${tag}" \
+  | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for asset in data.get('assets', []):
+    if asset['name'] == '${filename}':
+        print(asset['url'])
+        break
+else:
+    raise SystemExit('asset not found in release')
+")
+
+echo "fetch_model.sh: downloading model (this can take a minute)..."
+curl -fsSL ${auth_args[@]+"${auth_args[@]}"} \
+  -H "Accept: application/octet-stream" \
+  -o "$MODEL_PATH" "$asset_url"
+
 echo "fetch_model.sh: model downloaded ($(du -h "$MODEL_PATH" | cut -f1))."
