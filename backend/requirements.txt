@@ -1,0 +1,6 @@
+# Backend runtime dependencies (Python 3.12).
+# The HTTP server itself is stdlib-only; these three packages
+# enable real TensorFlow inference (without them it falls back to mock mode).
+numpy==2.5.3
+Pillow==12.3.0
+tensorflow-cpu==2.21.0

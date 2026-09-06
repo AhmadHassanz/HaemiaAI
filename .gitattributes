@@ -1,0 +1,12 @@
+# Normalize line endings: shell scripts must stay LF so they run on Linux (Render).
+* text=auto
+*.sh text eol=lf
+*.bat text eol=crlf
+
+# Binary assets — never normalize.
+*.keras binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary

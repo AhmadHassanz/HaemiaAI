@@ -1,0 +1,41 @@
+# ── Dependencies ──────────────────────────────────────────────
+node_modules/
+venv/
+backend/venv/
+
+# Embedded Python distribution used for local Windows inference (~600 MB)
+backend/python312/
+
+# ── Build output ──────────────────────────────────────────────
+dist/
+build/
+*.tsbuildinfo
+
+# ── Environment / secrets ─────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Python cache ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ── Model binaries ────────────────────────────────────────────
+# The .keras file is ~110 MB (GitHub hard limit is 100 MB per file).
+# It is shipped as a GitHub Release asset and downloaded at deploy time
+# by backend/fetch_model.sh (set MODEL_URL on Render).
+backend/model/*.keras
+
+# ── Test images ───────────────────────────────────────────────
+# May contain real eye photos — keep biometric data out of version control.
+test_images/
+
+# ── OS / editor junk ──────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.log

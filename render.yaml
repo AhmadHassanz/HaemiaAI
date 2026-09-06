@@ -1,0 +1,22 @@
+# Render Blueprint — deploys the Haemia backend as a Python web service.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# After applying this blueprint, set these env vars in the Render dashboard:
+#   MODEL_URL       - direct download URL of the .keras release asset on GitHub
+#   ALLOWED_ORIGINS - your Vercel frontend URL (CORS), e.g. https://haemia.vercel.app
+services:
+  - type: web
+    name: haemia-backend
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt && bash fetch_model.sh
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: MODEL_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false

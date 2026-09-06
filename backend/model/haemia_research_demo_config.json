@@ -1,0 +1,50 @@
+{
+  "model_name": "haemia_research_demo",
+  "model_status": "research_prototype_not_clinically_validated",
+  "input_size": [
+    224,
+    224,
+    3
+  ],
+  "input_range": [
+    0.0,
+    1.0
+  ],
+  "preprocessing": {
+    "exif_transpose": true,
+    "color_mode": "RGB",
+    "resize_policy": "center_crop_to_square_then_lanczos_resize"
+  },
+  "label_mapping": {
+    "0": "non_anemia_dataset_label",
+    "1": "anemia_dataset_label"
+  },
+  "demo_decision_rule": {
+    "threshold": 0.37,
+    "note": "Empirical demo threshold (midpoint between anemic/healthy score medians on Eyes-Defy-Anemia full-eye images). Not clinically validated. The raw score is not a probability."
+  },
+  "training_data": {
+    "source": "Eyes-Defy-Anemia full-eye images only",
+    "eligible_images": 216,
+    "dataset_label_counts": {
+      "non_anemia": 126,
+      "anemia": 90
+    },
+    "patient_ids_available": false
+  },
+  "development_evidence": {
+    "evaluation": "3x3 grouped nested cross-validation",
+    "roc_auc": 0.747,
+    "accuracy": 0.667,
+    "sensitivity": 0.656,
+    "specificity": 0.675,
+    "f1": 0.621,
+    "limitations": [
+      "Not patient-level validation",
+      "No external locked test set",
+      "Dataset labels and demographics were not independently verified",
+      "Not calibrated for disease probability",
+      "Not suitable for medical decisions"
+    ]
+  }
+}

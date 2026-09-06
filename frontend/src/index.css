@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-ink font-body text-slate-300 antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    @apply bg-rose-500/30 text-white;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #0a0a12;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #26263a;
+    border-radius: 8px;
+    border: 2px solid #0a0a12;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3b3b58;
+  }
+}
+
+@layer utilities {
+  /* Frosted glass card */
+  .glass {
+    @apply border border-white/10 bg-white/[0.04] backdrop-blur-xl;
+  }
+
+  /* Gradient headline text */
+  .text-gradient {
+    @apply bg-gradient-to-r from-rose-400 via-amber-300 to-rose-400 bg-clip-text text-transparent;
+    background-size: 200% auto;
+    animation: gradient-x 6s ease infinite;
+  }
+
+  /* Subtle blueprint grid for the page background */
+  .bg-grid {
+    background-image:
+      linear-gradient(to right, rgba(148, 163, 184, 0.05) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(148, 163, 184, 0.05) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+
+  /* Soft radial mask used over the grid */
+  .mask-fade {
+    -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 30%, transparent 75%);
+    mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 30%, transparent 75%);
+  }
+
+  /* Moving shine used on skeleton-like bars */
+  .shimmer-bar {
+    background: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.04) 25%,
+      rgba(255, 255, 255, 0.12) 50%,
+      rgba(255, 255, 255, 0.04) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 2.4s linear infinite;
+  }
+}
