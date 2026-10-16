@@ -20,8 +20,13 @@ import json
 import logging
 import os
 import struct
-from email.parser import BytesHeaderParser
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+import socket
+import time
+import uuid
+from email import policy
+from email.parser import BytesParser
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -46,19 +51,23 @@ if ENV_PATH.exists():
             os.environ.setdefault(k.strip(), v.strip())
 
 ALLOWED_ORIGINS = [
-    o.strip()
+    o.strip().rstrip("/")
     for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
     if o.strip()
 ]
 
 PORT = int(os.getenv("PORT", "8000"))
 MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
+MAX_REQUEST_BYTES = MAX_FILE_BYTES + 64 * 1024
+REQUEST_TIMEOUT_SECONDS = 30
+_prediction_slot = threading.BoundedSemaphore(1)
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 TARGET_SIZE = 224
 DARK_THRESHOLD = 5.0
 BRIGHT_THRESHOLD = 250.0
 MIN_SHORT_EDGE = 64
+MAX_DECODE_PIXELS = 4_000_000
 
 DISCLAIMER = (
     "Research prototype only. This image-based estimate is not clinically "
@@ -92,31 +101,54 @@ except ImportError:
     np = None  # type: ignore[assignment]
 
 try:
-    from PIL import Image, ExifTags, UnidentifiedImageError  # type: ignore[import-untyped]
+    from PIL import Image, ImageOps, UnidentifiedImageError  # type: ignore[import-untyped]
     _HAS_PIL = True
 except ImportError:
     Image = None  # type: ignore[assignment,misc]
-    ExifTags = None  # type: ignore[assignment,misc]
+    ImageOps = None  # type: ignore[assignment,misc]
     UnidentifiedImageError = Exception  # type: ignore[assignment,misc]
 
 model = None
+_model_error = None
+_model_loading = False
+_model_ready_event = threading.Event()
+_EXPECT_TF = _HAS_NP and _HAS_PIL
+RUNTIME_STATUS = "mock_mode_model_not_loaded"
 
-if _HAS_NP and _HAS_PIL:
+
+def _load_model_async():
+    """Load TensorFlow and the Keras model in a background thread.
+
+    This keeps the HTTP server /health endpoint responsive during the long
+    cold-start import, which is essential on free-tier hosts that kill
+    services whose health checks time out.
+    """
+    global model, _HAS_TF, _model_error, _model_loading, RUNTIME_STATUS
+    _model_loading = True
     try:
         os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+        os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "1")
+        os.environ.setdefault("TF_NUM_INTEROP_THREADS", "1")
         import tensorflow as tf  # type: ignore[import-untyped]
 
         model = tf.keras.models.load_model(str(MODEL_PATH), compile=False)
-        _ = model.predict(
+        _ = model(
             np.zeros((1, TARGET_SIZE, TARGET_SIZE, 3), dtype=np.float32),
-            verbose=0,
+            training=False,
         )
         _HAS_TF = True
+        RUNTIME_STATUS = MODEL_STATUS
         logger.info("TensorFlow model loaded – full inference enabled.")
-    except ImportError:
-        logger.warning("TensorFlow not found – mock inference mode.")
     except Exception as exc:
+        _model_error = exc
         logger.warning("Model load failed (%s) – mock inference mode.", exc)
+    finally:
+        _model_loading = False
+        _model_ready_event.set()
+
+
+if _EXPECT_TF:
+    threading.Thread(target=_load_model_async, daemon=True).start()
 else:
     missing = []
     if not _HAS_NP:
@@ -128,8 +160,8 @@ else:
         "Install Python 3.10-3.12 + requirements.txt for real inference.",
         ", ".join(missing),
     )
+    _model_ready_event.set()
 
-RUNTIME_STATUS = MODEL_STATUS if _HAS_TF else "mock_mode_model_not_loaded"
 
 # ---------------------------------------------------------------------------
 # Image helpers
@@ -204,30 +236,18 @@ def _preprocess_full(data: bytes):
     except Exception:
         return None, "Unable to read the uploaded file."
 
-    # EXIF transpose
     try:
-        exif = img.getexif()
-        orientation_key = next(
-            (k for k, v in ExifTags.Base.__members__.items() if v == "Orientation"),
-            None,
-        )
-        if orientation_key and orientation_key in exif:
-            orientation_val = exif[orientation_key]
-            transpose_map = {
-                2: Image.Transpose.FLIP_LEFT_RIGHT,
-                3: Image.Transpose.ROTATE_180,
-                4: Image.Transpose.FLIP_TOP_BOTTOM,
-                5: Image.Transpose.TRANSPOSE,
-                6: Image.Transpose.ROTATE_270,
-                7: Image.Transpose.TRANSVERSE,
-                8: Image.Transpose.ROTATE_90,
-            }
-            if orientation_val in transpose_map:
-                img = img.transpose(transpose_map[orientation_val])
+        # JPEG supports decoder-level reduction before allocating pixel buffers.
+        # Check other formats before decoding: compressed file size is not a
+        # useful bound on the memory needed for a phone photo.
+        img.draft("RGB", (TARGET_SIZE * 2, TARGET_SIZE * 2))
+        if img.width * img.height > MAX_DECODE_PIXELS:
+            img.close()
+            return None, "Image resolution is too large. Please resize it to at most 4 megapixels and retry."
+        with img:
+            img = ImageOps.exif_transpose(img).convert("RGB")
     except Exception:
-        pass
-
-    img = img.convert("RGB")
+        return None, "Unable to decode the uploaded image. Please choose another photo."
 
     w, h = img.size
     if min(w, h) < MIN_SHORT_EDGE:
@@ -278,17 +298,28 @@ def _mock_score(info: dict) -> float:
 # HTTP Handler
 # ---------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
+        self.request_id = uuid.uuid4().hex
+
     def _cors_headers(self):
         origin = self.headers.get("Origin", "")
-        if origin in ALLOWED_ORIGINS or not ALLOWED_ORIGINS:
-            self.send_header("Access-Control-Allow-Origin", origin or "*")
+        if origin in ALLOWED_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Expose-Headers", "X-Request-ID, Retry-After")
 
     def _json_response(self, code: int, body: dict):
         data = json.dumps(body).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("X-Request-ID", self.request_id)
+        self.send_header("Cache-Control", "no-store")
+        if code == 503:
+            self.send_header("Retry-After", "5")
         self._cors_headers()
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -302,24 +333,56 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/health":
+            ready = _model_ready_event.is_set()
             self._json_response(200, {
                 "status": "ok",
                 "model_status": RUNTIME_STATUS,
                 "inference_mode": "tensorflow" if _HAS_TF else "mock",
+                "model_ready": ready,
+                "model_loading": _model_loading,
             })
         else:
             self._json_response(404, {"detail": "Not found"})
 
     def do_POST(self):
+        started = time.monotonic()
+        if not _prediction_slot.acquire(blocking=False):
+            self._json_response(503, {"detail": "The server is busy. Please retry shortly."})
+            return
+        try:
+            self._predict()
+        except (socket.timeout, TimeoutError):
+            self._json_response(408, {"detail": "Upload timed out. Please retry on a stable connection."})
+        except (BrokenPipeError, ConnectionResetError):
+            logger.info("request_id=%s client disconnected", self.request_id)
+        except Exception:
+            logger.exception("request_id=%s prediction failed", self.request_id)
+            self._json_response(500, {"detail": "Unable to analyse this image. Please retry."})
+        finally:
+            _prediction_slot.release()
+            logger.info("request_id=%s duration_ms=%d", self.request_id,
+                        (time.monotonic() - started) * 1000)
+
+    def _predict(self):
         path = urlparse(self.path).path
         if path != "/api/v1/predict":
             self._json_response(404, {"detail": "Not found"})
             return
 
         content_type = self.headers.get("Content-Type", "")
-        content_length = int(self.headers.get("Content-Length", "0"))
+        if self.headers.get("Transfer-Encoding"):
+            self._json_response(400, {"detail": "Transfer-Encoding is not supported."})
+            return
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit():
+            self._json_response(400, {"detail": "A valid Content-Length is required."})
+            return
+        content_length = int(lengths[0])
+        if content_length <= 0:
+            self._json_response(400, {"detail": "The request body is empty."})
+            return
 
-        if content_length > MAX_FILE_BYTES:
+        if content_length > MAX_REQUEST_BYTES:
             self._json_response(413, {"detail": "File exceeds the 10 MB size limit."})
             return
 
@@ -330,6 +393,9 @@ class Handler(BaseHTTPRequestHandler):
 
         # Read body
         body_bytes = self.rfile.read(content_length)
+        if len(body_bytes) != content_length:
+            self._json_response(400, {"detail": "The upload was incomplete. Please retry."})
+            return
 
         # Parse multipart manually (cgi module removed in 3.13)
         try:
@@ -343,7 +409,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(400, {"detail": "Missing multipart boundary."})
                 return
 
-            image_data, file_ct = self._extract_multipart_field(
+            image_data, file_ct, filename = self._extract_multipart_field(
                 body_bytes, boundary.encode(), "image"
             )
         except Exception:
@@ -356,9 +422,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if file_ct not in ALLOWED_CONTENT_TYPES:
             # Also check by extension
-            fname = getattr(image_field, "filename", "") or ""
-            ext = Path(fname).suffix.lower()
-            if ext not in ALLOWED_EXTENSIONS and file_ct not in ALLOWED_CONTENT_TYPES:
+            ext = Path(filename).suffix.lower()
+            if ext not in ALLOWED_EXTENSIONS:
                 self._json_response(400, {"detail": "Only JPEG, PNG, and WEBP images are accepted."})
                 return
 
@@ -367,6 +432,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         if len(image_data) > MAX_FILE_BYTES:
             self._json_response(413, {"detail": "File exceeds the 10 MB size limit."})
+            return
+
+        if _EXPECT_TF and (not _model_ready_event.is_set() or not _HAS_TF):
+            detail = ("Model is still warming up. Please wait a few seconds and retry."
+                      if not _model_ready_event.is_set()
+                      else "The model is unavailable. Please try again later.")
+            self._json_response(503, {"detail": detail})
             return
 
         # Preprocess
@@ -381,7 +453,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # Inference
         if _HAS_TF:
-            raw_score = float(model.predict(processed, verbose=0)[0][0])
+            raw_score = float(model(processed, training=False)[0][0])
         else:
             raw_score = _mock_score(processed)
 
@@ -402,47 +474,44 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def log_message(self, format, *args):
-        logger.info(format, *args)
+        logger.info("request_id=%s " + format, self.request_id, *args)
 
     @staticmethod
     def _extract_multipart_field(
         body: bytes, boundary: bytes, field_name: str
-    ) -> tuple[bytes | None, str]:
+    ) -> tuple[bytes | None, str, str]:
         """Extract a named field from a multipart/form-data body.
 
-        Returns (file_bytes, content_type) or (None, '') if not found.
+        Returns (file_bytes, content_type, filename) or (None, '', '') if not found.
         """
-        sep = b"--" + boundary
-        parts = body.split(sep)
-        parser = BytesHeaderParser()
-        for part in parts:
-            if not part or part.strip() in (b"", b"--", b"--\r\n"):
-                continue
-            # Split headers from body at first blank line
-            if b"\r\n\r\n" in part:
-                header_block, file_body = part.split(b"\r\n\r\n", 1)
-            elif b"\n\n" in part:
-                header_block, file_body = part.split(b"\n\n", 1)
-            else:
-                continue
-            # Remove trailing boundary markers
-            if file_body.endswith(b"\r\n"):
-                file_body = file_body[:-2]
-            # Parse headers (strip leading whitespace from boundary split)
-            headers = parser.parsebytes(header_block.strip() + b"\n")
-            disposition = headers.get("Content-Disposition", "")
-            if f'name="{field_name}"' not in disposition:
-                continue
-            ct = headers.get("Content-Type", "application/octet-stream")
-            return file_body, ct.strip()
-        return None, ""
+        if not boundary or len(boundary) > 70 or any(c < 32 or c > 126 for c in boundary):
+            raise ValueError("Invalid multipart boundary")
+        message = BytesParser(policy=policy.default).parsebytes(
+            b'Content-Type: multipart/form-data; boundary="' + boundary + b'"\r\n'
+            b'MIME-Version: 1.0\r\n\r\n' + body
+        )
+        if not message.is_multipart() or message.defects:
+            raise ValueError("Malformed multipart body")
+        matches = []
+        for part in message.iter_parts():
+            if part.defects or part.is_multipart():
+                raise ValueError("Malformed multipart field")
+            if (part.get_content_disposition() == "form-data"
+                    and part.get_param("name", header="content-disposition") == field_name):
+                matches.append((part.get_payload(decode=True), part.get_content_type(),
+                                part.get_filename() or ""))
+        if len(matches) > 1:
+            raise ValueError("Duplicate image fields")
+        if matches:
+            return matches[0]
+        return None, "", ""
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     logger.info("Haemia backend listening on http://0.0.0.0:%d", PORT)
     logger.info("Inference mode: %s", "tensorflow" if _HAS_TF else "mock")
     try:

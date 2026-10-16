@@ -53,7 +53,7 @@ echo  Setup complete!
 echo  Start the backend with:
 echo    cd backend
 echo    venv\Scripts\activate
-echo    uvicorn main:app --reload --host 0.0.0.0 --port 8000
+echo    python main.py
 echo =======================================
 echo.
 pause

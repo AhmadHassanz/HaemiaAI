@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
+import { predictImage, type PredictResult } from '../lib/predict';
+import { prepareImage } from '../lib/prepareImage';
 import {
   ActivityIcon,
   AlertTriangleIcon,
@@ -23,16 +25,6 @@ import {
 } from '../components/Icons';
 
 type Stage = 'consent' | 'guide' | 'upload' | 'loading' | 'result' | 'retake';
-
-interface PredictResult {
-  risk: string;
-  message: string;
-  disclaimer: string;
-}
-
-interface ApiError {
-  detail: string;
-}
 
 const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const MAX_SIZE = 10 * 1024 * 1024; // 10 MB
@@ -181,7 +173,8 @@ export default function Demo() {
 
   const handleFileSelect = useCallback((selected: File | null) => {
     if (!selected) return;
-    if (!ACCEPTED_TYPES.includes(selected.type)) {
+    const hasSupportedExtension = /\.(jpe?g|png|webp)$/i.test(selected.name);
+    if (!ACCEPTED_TYPES.includes(selected.type) && !(selected.type === '' && hasSupportedExtension)) {
       setError('Unsupported file type. Please use JPEG, PNG, or WEBP.');
       setStage('retake');
       return;
@@ -203,9 +196,6 @@ export default function Demo() {
     setStage('loading');
     setError(null);
 
-    const form = new FormData();
-    form.append('image', file);
-
     const startedAt = performance.now();
     // Hold the scanning animation long enough to feel deliberate.
     const revealAfter = (fn: () => void) => {
@@ -214,25 +204,15 @@ export default function Demo() {
     };
 
     try {
-      const res = await fetch(`${API_BASE}/api/v1/predict`, { method: 'POST', body: form });
-      const data = await res.json();
-
-      if (!res.ok) {
-        const msg: string = (data as ApiError).detail ?? 'Something went wrong.';
-        revealAfter(() => {
-          setError(msg);
-          setStage('retake');
-        });
-        return;
-      }
-
+      const upload = await prepareImage(file);
+      const data = await predictImage(API_BASE, upload);
       revealAfter(() => {
-        setResult(data as PredictResult);
+        setResult(data);
         setStage('result');
       });
-    } catch {
+    } catch (failure) {
       revealAfter(() => {
-        setError('Network error — is the backend running?');
+        setError(failure instanceof Error ? failure.message : 'Unable to complete the analysis. Please try again.');
         setStage('retake');
       });
     }
@@ -506,7 +486,7 @@ export default function Demo() {
             >
               <AlertTriangleIcon className="h-7 w-7" />
             </motion.div>
-            <h1 className="font-display text-2xl font-bold text-white">Image not usable</h1>
+            <h1 className="font-display text-2xl font-bold text-white">Analysis could not finish</h1>
             <p className="mx-auto mt-3 max-w-md text-sm leading-relaxed text-slate-400">
               {error ?? 'The image could not be processed. Please try a different photo.'}
             </p>
@@ -591,7 +571,7 @@ function LoadingStage({ preview }: { preview: string | null }) {
         <div className="mx-auto h-1.5 w-56 overflow-hidden rounded-full bg-white/5">
           <div className="shimmer-bar h-full w-full rounded-full" />
         </div>
-        <p className="text-xs text-slate-600">This usually takes a few seconds</p>
+        <p className="text-xs text-slate-600">The first analysis can take longer while the server starts.</p>
       </div>
     </motion.div>
   );

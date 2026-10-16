@@ -3,7 +3,8 @@
 #
 # After applying this blueprint, set these env vars in the Render dashboard:
 #   MODEL_URL       - direct download URL of the .keras release asset on GitHub
-#   ALLOWED_ORIGINS - your Vercel frontend URL (CORS), e.g. https://haemia.vercel.app
+#   ALLOWED_ORIGINS - comma-separated frontend origins, e.g. https://haemia-ai.vercel.app
+#                     Include each custom domain actually serving the frontend.
 #   MODEL_TOKEN     - only if the GitHub repo is PRIVATE: fine-grained PAT,
 #                     Contents: Read-only (leave unset for public repos)
 services:
